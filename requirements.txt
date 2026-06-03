@@ -1,0 +1,53 @@
+# LocalMarkdown MCP server — Python dependencies
+# Tested with Python 3.10–3.12.  Install with:  pip install -r requirements.txt
+#
+# Docling pulls in PyTorch (for its layout + table models) and brings its own
+# OCR backend (EasyOCR), so you do NOT need to install PyMuPDF/openpyxl/
+# python-docx/easyocr separately — Docling handles PDF, Word, Excel, PowerPoint,
+# HTML and image OCR in one pipeline.
+
+# --- MCP server framework ---------------------------------------------------
+mcp[cli]>=1.2.0
+
+# --- Directory monitoring ---------------------------------------------------
+watchdog>=4.0.0
+
+# --- Document + image conversion (PDF/DOCX/XLSX/PPTX/HTML/images, OCR) -------
+docling>=2.0.0
+
+# --- Media transcription (audio + video) ------------------------------------
+# CTranslate2 backend — much faster and lighter than openai-whisper, no torch.
+# PyAV (bundled) decodes audio/video; the `ffmpeg` binary is recommended for
+# the widest container/codec coverage (apt install ffmpeg / winget Gyan.FFmpeg).
+faster-whisper>=1.0.0
+
+# --- Image description (the "vision" piece) ---------------------------------
+Pillow>=10.0.0          # technical image metadata (size/mode/format)
+
+# Pick a describer backend via LM_IMAGE_DESCRIBE (default: auto). The local-LLM
+# options below cost ZERO API tokens and need NO extra Python package — they
+# talk to a local server over HTTP using only the standard library.
+#
+#   * LM_IMAGE_DESCRIBE=ollama   (recommended local LLM — no tokens)
+#       Install Ollama from https://ollama.com, then pull a vision model:
+#         ollama pull llama3.2-vision       # or llava / moondream / qwen2.5-vl
+#       Configure with LM_OLLAMA_MODEL / LM_OLLAMA_HOST.
+#
+#   * LM_IMAGE_DESCRIBE=openai   (any OpenAI-compatible local server)
+#       LM Studio / llama.cpp --server / vLLM. Set LM_OPENAI_BASE_URL + LM_OPENAI_MODEL.
+#
+#   * LM_IMAGE_DESCRIBE=anthropic   (cloud Claude vision — uses API tokens)
+#       Uncomment the SDK below and set ANTHROPIC_API_KEY.
+# anthropic>=0.40.0
+#
+#   * LM_IMAGE_DESCRIBE=blip   (local caption model, no LLM, ~1 GB)
+# transformers>=4.40.0
+#
+# auto (default): uses a local Ollama server if one is reachable, else Claude if
+# ANTHROPIC_API_KEY is set, else local BLIP, else skips descriptions.
+
+# --- PyTorch (pulled in automatically by docling) ---------------------------
+# For a CPU-only or specific-CUDA build, install torch FIRST to avoid a large
+# default download:
+#   CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu121
