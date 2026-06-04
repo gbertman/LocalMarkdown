@@ -115,12 +115,20 @@ class Config:
     # When true, move each original out of the watch dir into its output folder
     # after a successful conversion, so the inbox empties as work completes.
     consume_source: bool = _env("LM_CONSUME_INBOX", "0").lower() in ("1", "true", "yes", "on")
-    # Optional separate archive for consumed originals. If set, moved files mirror
-    # the *source* tree here (no " md" suffix) instead of sitting next to the .md.
+    # Separate archive for consumed originals. Moved files mirror the *source*
+    # tree here (no dir_suffix) instead of sitting next to the .md. If unset,
+    # __post_init__ defaults it to a "processed" folder beside the output dir
+    # whenever consume_source is on, so raw originals never mix with the Markdown.
     archive_dir: Optional[Path] = field(default_factory=lambda: (
         Path(_env("LM_ARCHIVE_DIR", "")).expanduser().resolve()
         if _env("LM_ARCHIVE_DIR", "") else None
     ))
+
+    def __post_init__(self) -> None:
+        # Default consumed raw originals to "<output>/../processed" so they are
+        # kept out of the output folder. An explicit LM_ARCHIVE_DIR still wins.
+        if self.consume_source and self.archive_dir is None:
+            self.archive_dir = (self.output_dir.parent / "processed").resolve()
 
     @classmethod
     def from_args(cls, watch: Optional[str], output: Optional[str]) -> "Config":

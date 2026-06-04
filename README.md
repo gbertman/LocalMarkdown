@@ -107,16 +107,17 @@ suffixed by `LM_DIR_SUFFIX` (default `" md"`) and each file written as `<name>.m
 
 Set **`LM_CONSUME_INBOX=1`** to **move each original out of the inbox after a
 successful conversion**, so the inbox empties as work completes (now-empty source
-subfolders are pruned). By default the raw file lands in the **same folder as its
-Markdown**. Set **`LM_ARCHIVE_DIR=/path`** to instead collect originals in a
-separate archive that mirrors the **source** tree (no `" md"` suffix), keeping the
-Markdown output and the raw files cleanly apart. Originals are moved, never deleted;
-on a conversion error the original is left in the inbox for retry; name clashes get
-an 8-char hash.
+subfolders are pruned). **By default the raw originals are collected in a
+`processed/` folder beside the output dir** (i.e. `<output>/../processed`),
+mirroring the **source** tree (no `" md"` suffix) — so raw files never mix in with
+the generated Markdown. Set **`LM_ARCHIVE_DIR=/path`** to point that archive
+somewhere else. Originals are moved, never deleted; on a conversion error the
+original is left in the inbox for retry; name clashes get an 8-char hash.
 
-With `LM_CONSUME_INBOX=1` and `LM_ARCHIVE_DIR=/DocConvert/processed`, dropping
+Example: with `LM_CONSUME_INBOX=1`, output `/DocConvert/output`, dropping
 `Smith/contract.pdf` gives `output/Smith md/contract.pdf.md` **and**
-`processed/Smith/contract.pdf` (source mirror), and the inbox clears.
+`/DocConvert/processed/Smith/contract.pdf` (source mirror), and the inbox clears —
+no extra configuration needed.
 
 With `LM_OUTPUT_LAYOUT=mirror` **and** `LM_CONSUME_INBOX=1`:
 
