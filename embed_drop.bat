@@ -15,6 +15,17 @@ REM ============================================================================
 setlocal
 set "SCRIPT_DIR=%~dp0"
 
+REM ===========================================================================
+REM  EDIT THESE — your AnythingLLM connection
+REM  Get the key in AnythingLLM: Settings -> Tools -> Developer API ->
+REM  "Generate New API Key". Paste it between the quotes below.
+REM  SECURITY: this file then contains a secret. Don't commit the real key to a
+REM  public repo (keep the repo private, or blank the key before committing).
+REM ===========================================================================
+set "ALLM_URL=http://localhost:3001"
+set "ALLM_KEY=PASTE-YOUR-ANYTHINGLLM-API-KEY-HERE"
+REM ===========================================================================
+
 REM ---- Use the project's virtual environment if one exists -------------------
 if exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
     set "PY=%SCRIPT_DIR%.venv\Scripts\python.exe"
@@ -22,12 +33,13 @@ if exist "%SCRIPT_DIR%.venv\Scripts\python.exe" (
     set "PY=python"
 )
 
-if "%ALLM_URL%"=="" set "ALLM_URL=http://localhost:3001"
-
-if "%ALLM_KEY%"=="" (
-    echo [!] ALLM_KEY is not set. Run:  setx ALLM_KEY "your-api-key"
+if "%ALLM_KEY%"=="" set "ALLM_KEY=PASTE-YOUR-ANYTHINGLLM-API-KEY-HERE"
+if "%ALLM_KEY%"=="PASTE-YOUR-ANYTHINGLLM-API-KEY-HERE" (
+    echo [!] Open embed_drop.bat and set ALLM_KEY to your AnythingLLM API key.
     echo     ^(AnythingLLM: Settings -^> Tools -^> Developer API -^> Generate^)
     echo.
+    pause
+    exit /b 2
 )
 
 REM ---- No files dropped: just show the available workspaces ------------------
