@@ -1,10 +1,10 @@
 # LocalMarkdown MCP server — Python dependencies
 # Tested with Python 3.10–3.12.  Install with:  pip install -r requirements.txt
 #
-# Docling pulls in PyTorch (for its layout + table models) and brings its own
-# OCR backend (EasyOCR), so you do NOT need to install PyMuPDF/openpyxl/
-# python-docx/easyocr separately — Docling handles PDF, Word, Excel, PowerPoint,
-# HTML and image OCR in one pipeline.
+# Docling pulls in PyTorch (for its layout + table models) and handles PDF, Word,
+# Excel, PowerPoint and HTML in one pipeline, so you do NOT need PyMuPDF/openpyxl/
+# python-docx separately. NOTE: recent Docling versions no longer bundle an OCR
+# engine, so EasyOCR is listed explicitly below for image/scanned-PDF OCR.
 
 # --- MCP server framework ---------------------------------------------------
 mcp[cli]>=1.2.0
@@ -14,6 +14,11 @@ watchdog>=4.0.0
 
 # --- Document + image conversion (PDF/DOCX/XLSX/PPTX/HTML/images, OCR) -------
 docling>=2.0.0
+# Docling no longer bundles an OCR engine in recent versions; this project's
+# pipeline requests EasyOCR explicitly, so install it alongside Docling.
+# (EasyOCR reuses the torch installed above; on first use it downloads ~64 MB
+# of detection/recognition models per OCR language.)
+easyocr>=1.7.0
 
 # --- Media transcription (audio + video) ------------------------------------
 # CTranslate2 backend — much faster and lighter than openai-whisper, no torch.
