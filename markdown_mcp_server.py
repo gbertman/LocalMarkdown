@@ -129,10 +129,14 @@ VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
 TEXT_EXTS = {".txt", ".md", ".markdown", ".log", ".json", ".yaml", ".yml"}
 CSV_EXTS = {".csv", ".tsv"}
+# Email: .eml/.msg convert to one Markdown file each (attachments inlined);
+# .pst is an Outlook *mailbox* and is burst into many messages (see _process_pst).
+EMAIL_EXTS = {".eml", ".msg"}
+PST_EXTS = {".pst"}
 
 ALL_SUPPORTED = (
     PDF_EXTS | EXCEL_EXTS | WORD_EXTS | PPTX_EXTS | HTML_EXTS | AUDIO_EXTS
-    | VIDEO_EXTS | IMAGE_EXTS | TEXT_EXTS | CSV_EXTS
+    | VIDEO_EXTS | IMAGE_EXTS | TEXT_EXTS | CSV_EXTS | EMAIL_EXTS | PST_EXTS
 )
 
 log = logging.getLogger("localmarkdown")
@@ -573,6 +577,209 @@ def convert_csv(path: Path, cfg: Config) -> str:
     return md_table(rows)
 
 
+# -- Email (.eml / .msg) + Outlook PST -------------------------------------- #
+
+from html.parser import HTMLParser as _HTMLParser
+
+
+@dataclass
+class ParsedEmail:
+    """Format-neutral view of one email, shared by the .eml/.msg/.pst paths."""
+    headers: dict
+    body: str
+    attachments: list  # list[tuple[str filename, bytes data]]
+
+
+class _HTMLTextExtractor(_HTMLParser):
+    """Minimal HTML -> text (stdlib only) for email bodies, no markup dependency."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self._skip += 1
+        elif tag in {"br", "p", "div", "tr", "li", "h1", "h2", "h3"}:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"} and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip and data.strip():
+            self._chunks.append(data)
+
+    def text(self) -> str:
+        import re
+        return re.sub(r"\n{3,}", "\n\n", "".join(self._chunks)).strip()
+
+
+def _html_to_text(html: str) -> str:
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(html)
+    except Exception:  # noqa: BLE001 - never let a malformed body kill conversion
+        return html
+    return parser.text()
+
+
+def _fmt_headers(headers: dict) -> str:
+    if not headers:
+        return "_(no headers)_"
+    return "\n".join(f"- **{k}:** {v}" for k, v in headers.items())
+
+
+def _email_body_text(msg) -> str:
+    """Best body text from a parsed email.message.EmailMessage (plain preferred)."""
+    plain = html = None
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        if part.get_content_maintype() == "multipart":
+            continue
+        if part.get_content_disposition() == "attachment":
+            continue
+        try:
+            content = part.get_content()
+        except Exception:  # noqa: BLE001
+            continue
+        ctype = part.get_content_type()
+        if ctype == "text/plain" and plain is None:
+            plain = content
+        elif ctype == "text/html" and html is None:
+            html = content
+    if isinstance(plain, str) and plain.strip():
+        return plain.strip()
+    if isinstance(html, str) and html.strip():
+        return _html_to_text(html)
+    return ""
+
+
+def _parse_eml(path: Path) -> ParsedEmail:
+    import email
+    from email import policy
+
+    with path.open("rb") as fh:
+        msg = email.message_from_binary_file(fh, policy=policy.default)
+    headers = {}
+    for h in ("From", "To", "Cc", "Bcc", "Subject", "Date"):
+        val = msg.get(h)
+        if val:
+            headers[h] = str(val).strip()
+    attachments: list = []
+    if hasattr(msg, "iter_attachments"):
+        for part in msg.iter_attachments():
+            filename = part.get_filename() or "attachment.bin"
+            try:
+                data = part.get_content()
+            except Exception:  # noqa: BLE001
+                data = part.get_payload(decode=True) or b""
+            if isinstance(data, str):
+                data = data.encode("utf-8", "replace")
+            attachments.append((filename, bytes(data)))
+    return ParsedEmail(headers=headers, body=_email_body_text(msg), attachments=attachments)
+
+
+def _parse_msg(path: Path) -> ParsedEmail:
+    try:
+        import extract_msg
+    except ImportError as exc:  # pragma: no cover - env dependent
+        raise RuntimeError(
+            "extract-msg is not installed. Install it with `pip install extract-msg` "
+            "to convert Outlook .msg files."
+        ) from exc
+
+    m = extract_msg.Message(str(path))
+    try:
+        headers = {}
+        for label, val in (
+            ("From", m.sender), ("To", m.to), ("Cc", m.cc),
+            ("Subject", m.subject), ("Date", m.date),
+        ):
+            if val:
+                headers[label] = str(val).strip()
+        body = (m.body or "").strip()
+        if not body and getattr(m, "htmlBody", None):
+            raw = m.htmlBody
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", "replace")
+            body = _html_to_text(raw)
+        attachments: list = []
+        for att in m.attachments:
+            filename = att.longFilename or att.shortFilename or "attachment.bin"
+            data = att.data
+            if not isinstance(data, (bytes, bytearray, str)):
+                continue  # embedded sub-message; skipped (rare)
+            if isinstance(data, str):
+                data = data.encode("utf-8", "replace")
+            attachments.append((filename, bytes(data)))
+        return ParsedEmail(headers=headers, body=body, attachments=attachments)
+    finally:
+        try:
+            m.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _parse_email(path: Path) -> ParsedEmail:
+    return _parse_msg(path) if path.suffix.lower() == ".msg" else _parse_eml(path)
+
+
+def _render_email_inline(parsed: ParsedEmail) -> str:
+    """Flatten a nested email (an .eml/.msg *attachment*) to text so it isn't lost."""
+    out = [_fmt_headers(parsed.headers), "", parsed.body or "_(no body)_"]
+    if parsed.attachments:
+        names = ", ".join(n for n, _ in parsed.attachments)
+        out.append(f"\n_(nested email carried {len(parsed.attachments)} attachment(s): {names})_")
+    return "\n".join(out)
+
+
+def convert_attachment_bytes(filename: str, data: bytes, cfg: Config) -> tuple[str, str]:
+    """Convert one attachment's bytes to (kind, markdown_body) via the normal converters."""
+    import tempfile
+
+    suffix = Path(filename).suffix.lower()
+    if suffix in EMAIL_EXTS:
+        # A forwarded email: inline its text rather than recursing into more files.
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+                fh.write(data)
+                tmp = Path(fh.name)
+            return ("email", _render_email_inline(_parse_email(tmp)))
+        except Exception as exc:  # noqa: BLE001
+            return ("email", f"_(nested email could not be parsed: {exc})_")
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+    mapping = converter_for(suffix)
+    if mapping is None:
+        return ("other", f"_(unsupported attachment type '{suffix or 'none'}', not converted)_")
+    kind, convert = mapping
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix or ".bin", delete=False) as fh:
+            fh.write(data)
+            tmp = Path(fh.name)
+        body = convert(tmp, cfg)
+        return (kind, body if body and body.strip() else "_(no content extracted)_")
+    except Exception as exc:  # noqa: BLE001 - one bad attachment must not kill the email
+        log.warning("Attachment conversion failed for %s: %s", filename, exc)
+        return (kind, f"_(attachment conversion failed: {exc})_")
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 # Dispatch table -----------------------------------------------------------> #
 
 def converter_for(suffix: str) -> Optional[tuple[str, Callable[[Path, Config], str]]]:
@@ -706,6 +913,14 @@ class Pipeline:
         src = src.resolve()
         if not src.is_file():
             return None
+        # Emails and PST mailboxes don't fit the one-file->one-Markdown model:
+        # an email also emits a separate, provenance-tagged file per attachment,
+        # and a .pst expands into many messages. Route them to dedicated handlers.
+        suffix = src.suffix.lower()
+        if suffix in PST_EXTS:
+            return self._process_pst(src, force=force)
+        if suffix in EMAIL_EXTS:
+            return self._process_email(src, force=force)
         mapping = converter_for(src.suffix)
         if mapping is None:
             log.debug("Unsupported file type, skipping: %s", src.name)
@@ -761,6 +976,199 @@ class Pipeline:
         if status == "ok":
             self.stats["processed"] += 1
         return out_path
+
+    # -- Email / PST helpers ------------------------------------------------ #
+
+    def _write_status_md(self, src: Path, digest: str, kind: str, status: str, body: str) -> Path:
+        """Write a small placeholder Markdown so failures/notices are visible in the catalog."""
+        md_name = safe_md_name(src, self.cfg)
+        out_path = self.cfg.output_dir / md_name
+        frontmatter = build_frontmatter({
+            "source": str(src),
+            "filename": src.name,
+            "type": kind,
+            "bytes": src.stat().st_size if src.exists() else 0,
+            "processed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "hash": digest,
+            "status": status,
+        })
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(f"{frontmatter}\n\n# {src.name}\n\n{body}\n", encoding="utf-8")
+        self.catalog.record(src, md_name, digest, kind, status)
+        return out_path
+
+    def _emit_email_files(
+        self, parsed: ParsedEmail, base_slug: str, source_id: str, container: Optional[str]
+    ) -> tuple[str, int]:
+        """Write the email body Markdown plus one provenance-tagged file per attachment.
+
+        Returns (email_markdown_name, attachment_count). Attachment files are named
+        ``<base_slug>__attNN__<filename>.<hash>.md`` and carry frontmatter linking
+        them back to the parent email; the email file links forward to each of them.
+        """
+        out_dir = self.cfg.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        subject = parsed.headers.get("Subject", "")
+
+        att_links: list[tuple[str, str, str, int]] = []  # (filename, md_name, kind, size)
+        for i, (filename, data) in enumerate(parsed.attachments, start=1):
+            kind, body = convert_attachment_bytes(filename, data, self.cfg)
+            att_slug = f"{base_slug}__att{i:02d}__{filename}".replace(" ", "_")
+            short = hashlib.sha1(f"{source_id}::{i}::{filename}".encode("utf-8")).hexdigest()[:8]
+            att_md_name = f"{att_slug}.{short}.md"
+            att_fm = build_frontmatter({
+                "source": f"{source_id}#attachment:{filename}",
+                "filename": filename,
+                "type": kind,
+                "origin": "email-attachment",
+                "attachment_of": source_id,
+                "email_subject": subject,
+                "email_from": parsed.headers.get("From", ""),
+                "email_date": parsed.headers.get("Date", ""),
+                "container": container or "",
+                "bytes": len(data),
+                "processed": now,
+                "status": "ok",
+            })
+            (out_dir / att_md_name).write_text(
+                f"{att_fm}\n\n# Attachment: {filename}\n\n"
+                f"_From email: {subject or '(no subject)'}_\n\n{body}\n",
+                encoding="utf-8",
+            )
+            self.catalog.record(
+                Path(f"{source_id}#attachment:{filename}"), att_md_name, short, kind, "ok"
+            )
+            att_links.append((filename, att_md_name, kind, len(data)))
+
+        parts = ["## Headers", _fmt_headers(parsed.headers),
+                 "\n## Body", parsed.body or "_(no body text)_"]
+        if att_links:
+            parts.append("\n## Attachments")
+            for filename, md_name, kind, size in att_links:
+                parts.append(f"- [{filename}]({md_name}) — {kind}, {size:,} bytes")
+        elif parsed.attachments:
+            parts.append("\n## Attachments\n_(present but none could be converted)_")
+
+        email_md_name = f"{base_slug}.{hashlib.sha1(source_id.encode('utf-8')).hexdigest()[:8]}.md"
+        email_fm = build_frontmatter({
+            "source": source_id,
+            "filename": base_slug,
+            "type": "email",
+            "origin": "email",
+            "subject": subject,
+            "from": parsed.headers.get("From", ""),
+            "to": parsed.headers.get("To", ""),
+            "date": parsed.headers.get("Date", ""),
+            "attachments": [f for f, _, _, _ in att_links] or "",
+            "container": container or "",
+            "processed": now,
+            "status": "ok",
+        })
+        (out_dir / email_md_name).write_text(
+            f"{email_fm}\n\n# {subject or base_slug}\n\n" + "\n".join(parts) + "\n",
+            encoding="utf-8",
+        )
+        return email_md_name, len(att_links)
+
+    def _process_email(self, src: Path, force: bool = False) -> Optional[Path]:
+        """Convert a single .eml/.msg: email body + a separate file per attachment."""
+        if not wait_until_stable(src):
+            log.warning("File vanished before processing: %s", src)
+            return None
+        try:
+            digest = file_hash(src)
+        except OSError as exc:
+            log.warning("Cannot read %s: %s", src, exc)
+            return None
+        if not force and not self.catalog.needs_processing(src, digest):
+            self.stats["skipped"] += 1
+            md_name = self.catalog._data.get(str(src), {}).get("markdown")
+            return self.cfg.output_dir / md_name if md_name else None
+
+        try:
+            rel = src.relative_to(self.cfg.watch_dir)
+        except ValueError:
+            rel = Path(src.name)
+        base_slug = "_".join(rel.parts).replace(" ", "_")
+
+        try:
+            parsed = _parse_email(src)
+        except Exception as exc:  # noqa: BLE001
+            self.stats["errors"] += 1
+            log.exception("Failed to parse email %s", src)
+            return self._write_status_md(src, digest, "email", "error",
+                                         f"> **Email parse failed:** `{exc}`")
+
+        email_md_name, n_att = self._emit_email_files(parsed, base_slug, str(src), container=None)
+        self.catalog.record(src, email_md_name, digest, "email", "ok")
+        self.stats["processed"] += 1
+        log.info("Email %s -> %s (+%d attachment file(s))", src.name, email_md_name, n_att)
+        return self.cfg.output_dir / email_md_name
+
+    def _process_pst(self, src: Path, force: bool = False) -> Optional[Path]:
+        """Burst an Outlook .pst into messages with `readpst`, then convert each."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        if not wait_until_stable(src):
+            log.warning("File vanished before processing: %s", src)
+            return None
+        try:
+            digest = file_hash(src)
+        except OSError as exc:
+            log.warning("Cannot read %s: %s", src, exc)
+            return None
+        if not force and not self.catalog.needs_processing(src, digest):
+            self.stats["skipped"] += 1
+            log.debug("Unchanged, skipping: %s", src.name)
+            return None
+
+        readpst = shutil.which("readpst")
+        if readpst is None:
+            note = ("readpst not found. Install it with `sudo apt install pst-utils` "
+                    "to convert Outlook .pst mailboxes.")
+            log.error(note)
+            self.stats["errors"] += 1
+            return self._write_status_md(src, digest, "pst", "error", f"> **{note}**")
+
+        tmp = Path(tempfile.mkdtemp(prefix="lm_pst_"))
+        messages = attachments = 0
+        try:
+            log.info("Bursting PST %s with readpst ...", src.name)
+            subprocess.run(
+                [readpst, "-e", "-D", "-o", str(tmp), str(src)],
+                check=True, capture_output=True,
+            )
+            for eml in sorted(tmp.rglob("*.eml")):
+                rel = eml.relative_to(tmp)
+                source_id = f"{src}!{rel.as_posix()}"
+                base_slug = f"{src.stem}_" + "_".join(rel.parts)
+                base_slug = base_slug[:-4] if base_slug.lower().endswith(".eml") else base_slug
+                base_slug = base_slug.replace(" ", "_")
+                try:
+                    parsed = _parse_eml(eml)
+                    _, n_att = self._emit_email_files(parsed, base_slug, source_id, container=str(src))
+                    messages += 1
+                    attachments += n_att
+                except Exception as exc:  # noqa: BLE001 - skip a bad message, keep going
+                    log.exception("Failed to convert message %s from %s", rel, src.name)
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", "replace")[:500]
+            log.error("readpst failed on %s: %s", src.name, err)
+            self.stats["errors"] += 1
+            return self._write_status_md(src, digest, "pst", "error",
+                                         f"> **readpst failed:** `{err}`")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.catalog.record(
+            src, f"{messages} message(s), {attachments} attachment(s)", digest, "pst", "ok"
+        )
+        self.stats["processed"] += 1
+        log.info("PST %s -> %d message(s), %d attachment(s).", src.name, messages, attachments)
+        return None
 
     def process_path(self, path: Path, force: bool = False) -> int:
         """Process a single file or recurse into a folder. Returns count attempted."""

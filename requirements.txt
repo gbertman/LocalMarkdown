@@ -46,6 +46,16 @@ Pillow>=10.0.0          # technical image metadata (size/mode/format)
 # auto (default): uses a local Ollama server if one is reachable, else Claude if
 # ANTHROPIC_API_KEY is set, else local BLIP, else skips descriptions.
 
+# --- Email parsing ----------------------------------------------------------
+# .eml is handled entirely by the Python standard library (no dependency).
+# .msg (Outlook single message) needs extract-msg:
+extract-msg>=0.45.0
+# .pst (Outlook mailbox) is exploded into messages by the `readpst` binary from
+# pst-utils -- a SYSTEM package, NOT pip:   sudo apt install pst-utils
+# Email attachments are written as their own Markdown files, each tagged in its
+# frontmatter (attachment_of / email_subject / container) so you can trace which
+# email they came from.
+
 # --- PyTorch (pulled in automatically by docling) ---------------------------
 # For a CPU-only or specific-CUDA build, install torch FIRST to avoid a large
 # default download:

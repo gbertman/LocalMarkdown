@@ -12,6 +12,7 @@ documents, media and images.
 | Video      | **faster-whisper**                 | `.mp4 .mkv .mov .avi .webm .m4v .wmv .flv`  |
 | Images     | Pillow + Docling OCR + VLM caption  | `.png .jpg .jpeg .bmp .tiff .gif .webp`     |
 | Plain/data | built-in                           | `.txt .md .log .json .yaml`, `.csv .tsv`    |
+| Email      | stdlib / extract-msg / readpst     | `.eml .msg .pst` (attachments converted to their own files) |
 
 Image files get three layers: technical **properties** (Pillow), a natural-language
 **description** from a vision model (Claude vision, or a local BLIP caption when
@@ -334,7 +335,7 @@ sudo useradd -r -m -d /opt/localmarkdown -s /usr/sbin/nologin localmd  # service
 sudo -u localmd git clone <your-repo> /opt/localmarkdown/app   # or copy the files
 cd /opt/localmarkdown/app
 
-sudo apt install -y python3-venv ffmpeg libgl1 libglib2.0-0
+sudo apt install -y python3-venv ffmpeg libgl1 libglib2.0-0 pst-utils  # pst-utils only needed for .pst mailboxes
 sudo -u localmd python3 -m venv /opt/localmarkdown/venv
 sudo -u localmd /opt/localmarkdown/venv/bin/pip install -r requirements.txt
 
@@ -461,6 +462,9 @@ nohup python markdown_mcp_server.py watch ./inbox --output ./out > localmd.log 2
 | MCP client shows garbled handshake | Don’t print to stdout; logs already go to stderr. |
 | Out of memory on large media | Use a smaller `LM_WHISPER_MODEL` (e.g. `tiny`/`base`) or set `LM_MAX_BYTES`. |
 | Re-process an unchanged file | `process <path> --force`, or the `process_path(..., force=true)` tool. |
+| `.msg` files skipped / `extract-msg is not installed` | `pip install extract-msg` (already in requirements.txt). |
+| `.pst` shows `readpst not found` | `sudo apt install pst-utils`. The `.pst` is exploded into one Markdown per message. |
+| Which email did an attachment come from? | Open the attachment `.md`: its frontmatter has `attachment_of`, `email_subject`, and `container`. Files also share the email's name prefix and carry an `__attNN__` marker. |
 
 ---
 
