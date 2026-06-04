@@ -446,6 +446,28 @@ python markdown_mcp_server.py watch ./inbox --output ./out
 nohup python markdown_mcp_server.py watch ./inbox --output ./out > localmd.log 2>&1 &
 ```
 
+### 6.6 Updating to the latest version
+
+Pull the newest code from GitHub, refresh dependencies, and restart the service:
+
+```bash
+# 1. download the latest code (run as the service user that owns the clone)
+sudo -u localmd git -C /opt/localmarkdown/app pull
+
+# 2. install any new/updated dependencies into the venv
+sudo -u localmd /opt/localmarkdown/venv/bin/pip install -r /opt/localmarkdown/app/requirements.txt
+
+# 3. restart the service to load the new code
+sudo systemctl restart localmarkdown.service
+journalctl -u localmarkdown.service -f      # confirm a clean start
+```
+
+> If `git pull` reports **"dubious ownership"**, the clone is owned by a different
+> user than the one running `git`. Run the `pull` as the owning user (the
+> `sudo -u localmd …` above), or mark it safe: `git config --global --add
+> safe.directory /opt/localmarkdown/app`. If `pull` reports local changes, stash
+> them first: `sudo -u localmd git -C /opt/localmarkdown/app stash`.
+
 ---
 
 ## 7. Troubleshooting
