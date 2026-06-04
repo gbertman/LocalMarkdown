@@ -197,9 +197,10 @@ class _Lazy:
                     popts = PdfPipelineOptions()
                     popts.do_ocr = True
                     popts.do_table_structure = True
-                    popts.ocr_options = EasyOcrOptions(
-                        lang=list(ocr_langs), use_gpu=_cuda_available()
-                    )
+                    # Select GPU vs CPU via accelerator_options (the modern API);
+                    # the old EasyOcrOptions(use_gpu=...) is deprecated and noisy.
+                    _set_accelerator_device(popts, _cuda_available())
+                    popts.ocr_options = EasyOcrOptions(lang=list(ocr_langs))
                     self._docling = DocumentConverter(
                         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=popts)}
                     )
@@ -271,6 +272,30 @@ def _cuda_available() -> bool:
         return bool(torch.cuda.is_available())
     except Exception:
         return False
+
+
+def _set_accelerator_device(pipeline_options, use_cuda: bool) -> None:
+    """Set Docling's accelerator device (replaces the deprecated EasyOcrOptions.use_gpu).
+
+    Version-tolerant: AcceleratorOptions/AcceleratorDevice moved between modules
+    across Docling releases, so try both import paths and degrade gracefully.
+    To pick *which* physical GPU, set CUDA_VISIBLE_DEVICES in the environment.
+    """
+    try:
+        try:
+            from docling.datamodel.accelerator_options import (
+                AcceleratorDevice,
+                AcceleratorOptions,
+            )
+        except ImportError:
+            from docling.datamodel.pipeline_options import (  # type: ignore
+                AcceleratorDevice,
+                AcceleratorOptions,
+            )
+        device = AcceleratorDevice.CUDA if use_cuda else AcceleratorDevice.CPU
+        pipeline_options.accelerator_options = AcceleratorOptions(device=device)
+    except Exception as exc:  # noqa: BLE001 - non-fatal; Docling auto-detects otherwise
+        log.debug("Could not set Docling accelerator device explicitly: %s", exc)
 
 
 LAZY = _Lazy()
