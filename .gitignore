@@ -1,0 +1,33 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime-generated data (never commit these)
+allm_sync_state.json
+allm_sync_state.tmp
+index.json
+_skipped.json
+
+# Default local working dirs (the real ones live outside the repo, e.g. /DocConvert)
+/inbox/
+/markdown_output/
+/processed/
+
+# Local test fixtures created while iterating
+t_inbox/
+t_out/
+t_drop/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
