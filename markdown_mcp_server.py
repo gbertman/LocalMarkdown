@@ -907,7 +907,42 @@ class Pipeline:
     def __init__(self, cfg: Config, catalog: Catalog) -> None:
         self.cfg = cfg
         self.catalog = catalog
-        self.stats = {"processed": 0, "skipped": 0, "errors": 0}
+        self.stats = {"processed": 0, "skipped": 0, "unsupported": 0, "errors": 0}
+        # Persistent manifest of files we couldn't convert, so nothing is dropped
+        # silently. Lives next to the Markdown so it's visible over the share.
+        self._skip_path = cfg.output_dir / "_skipped.json"
+        self._skip_lock = threading.Lock()
+        self._skipped: dict[str, dict] = {}
+        if self._skip_path.exists():
+            try:
+                self._skipped = json.loads(self._skip_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                self._skipped = {}
+
+    def _note_unsupported(self, path: Path, reason: str = "unsupported file type") -> None:
+        """Record (and log, once) a file that was skipped instead of converted."""
+        key = str(path)
+        with self._skip_lock:
+            is_new = key not in self._skipped
+            self._skipped[key] = {
+                "path": key,
+                "ext": path.suffix.lower() or "(none)",
+                "reason": reason,
+                "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            try:
+                tmp = self._skip_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(self._skipped, indent=2), encoding="utf-8")
+                tmp.replace(self._skip_path)
+            except OSError as exc:
+                log.warning("Could not write skip manifest: %s", exc)
+        if is_new:
+            self.stats["unsupported"] += 1
+            log.info("SKIPPED (%s): %s", reason, path)
+
+    def skipped_entries(self) -> list[dict]:
+        with self._skip_lock:
+            return list(self._skipped.values())
 
     def process_file(self, src: Path, force: bool = False) -> Optional[Path]:
         src = src.resolve()
@@ -923,7 +958,7 @@ class Pipeline:
             return self._process_email(src, force=force)
         mapping = converter_for(src.suffix)
         if mapping is None:
-            log.debug("Unsupported file type, skipping: %s", src.name)
+            self._note_unsupported(src)
             return None
         kind, convert = mapping
 
@@ -1179,12 +1214,16 @@ class Pipeline:
             count += 1
         elif path.is_dir():
             for child in sorted(path.rglob("*")):
-                if child.is_file() and child.suffix.lower() in ALL_SUPPORTED:
-                    # Avoid re-ingesting our own output directory.
-                    if self.cfg.output_dir in child.parents:
-                        continue
+                if not child.is_file():
+                    continue
+                # Avoid re-ingesting our own output directory.
+                if self.cfg.output_dir in child.parents:
+                    continue
+                if child.suffix.lower() in ALL_SUPPORTED:
                     self.process_file(child, force=force)
                     count += 1
+                else:
+                    self._note_unsupported(child)
         else:
             log.warning("Path does not exist: %s", path)
         return count
@@ -1215,6 +1254,8 @@ def start_watcher(pipeline: Pipeline) -> "Observer":  # type: ignore[name-define
                 pipeline.process_path(path)
             elif path.suffix.lower() in ALL_SUPPORTED:
                 pipeline.process_file(path)
+            elif path.is_file():
+                pipeline._note_unsupported(path)
 
         def on_created(self, event):
             self._handle(event.src_path)
@@ -1314,6 +1355,17 @@ def run_mcp_server(pipeline: Pipeline, with_watcher: bool = True) -> None:
         )
 
     @mcp.tool()
+    def list_skipped() -> str:
+        """List files that were skipped (unsupported type or unconvertible), with reasons."""
+        items = pipeline.skipped_entries()
+        if not items:
+            return "No files have been skipped."
+        lines = [f"{len(items)} file(s) skipped (also in {pipeline._skip_path.name}):\n"]
+        for e in sorted(items, key=lambda x: x.get("updated", ""), reverse=True):
+            lines.append(f"- `{e['path']}` ({e['ext']}) — {e['reason']}")
+        return "\n".join(lines)
+
+    @mcp.tool()
     def server_status() -> str:
         """Report watcher configuration and processing statistics."""
         return (
@@ -1324,6 +1376,7 @@ def run_mcp_server(pipeline: Pipeline, with_watcher: bool = True) -> None:
             f"OCR langs   : {', '.join(cfg.ocr_langs)}\n"
             f"Image desc  : {cfg.image_describe} ({_describer_detail(cfg)})\n"
             f"Documents   : {len(catalog.entries())}\n"
+            f"Skipped     : {len(pipeline.skipped_entries())} (unsupported/unconvertible; see _skipped.json)\n"
             f"Stats       : {pipeline.stats}"
         )
 
