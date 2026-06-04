@@ -84,7 +84,8 @@ CLI flags override environment variables:
 | `LM_OUTPUT_DIR`     | `--output`  | `./markdown_output`  | Where `.md` files are written   |
 | `LM_OUTPUT_LAYOUT`  | —           | `flat`               | `flat` = all `.md` in one folder; `mirror` = recreate the source tree, each folder suffixed (see `LM_DIR_SUFFIX`), files written as `<name>.md` |
 | `LM_DIR_SUFFIX`     | —           | ` md`                | In `mirror` layout, appended to every recreated folder name (e.g. `Smith` → `Smith md`) |
-| `LM_CONSUME_INBOX`  | —           | `0`                  | `1` = **move** each original into its output folder after a successful convert, so the inbox empties (empty source dirs are pruned) |
+| `LM_CONSUME_INBOX`  | —           | `0`                  | `1` = **move** each original out of the inbox after a successful convert, so the inbox empties (empty source dirs are pruned) |
+| `LM_ARCHIVE_DIR`    | —           | (unset)              | With `LM_CONSUME_INBOX=1`: move consumed originals here, mirroring the **source** tree (no suffix). Unset = keep them next to their `.md` |
 | `LM_WHISPER_MODEL`  | —           | `base`               | faster-whisper size: `tiny`/`base`/`small`/`medium`/`large-v3` |
 | `LM_OCR_LANGS`      | —           | `en`                 | Docling OCR languages, e.g. `en,fr` |
 | `LM_IMAGE_DESCRIBE` | —           | `auto`               | `auto`/`ollama`/`openai`/`anthropic`/`blip`/`none` (see §2.1) |
@@ -96,6 +97,38 @@ CLI flags override environment variables:
 | `LM_VLM_TIMEOUT`    | —           | `120`                | Seconds per VLM request      |
 | `LM_MAX_BYTES`      | —           | `0` (no limit)       | Skip OCR/transcribe above N bytes |
 | `LM_LOG_LEVEL`      | —           | `INFO`               | `DEBUG`/`INFO`/`WARNING`        |
+
+### 2.0 Output layout & clearing the inbox
+
+By default (`LM_OUTPUT_LAYOUT=flat`) every `.md` is written into one output folder
+with a mangled, collision-proof name. Set **`LM_OUTPUT_LAYOUT=mirror`** to instead
+**recreate the source folder tree** under the output dir, with each folder name
+suffixed by `LM_DIR_SUFFIX` (default `" md"`) and each file written as `<name>.md`.
+
+Set **`LM_CONSUME_INBOX=1`** to **move each original out of the inbox after a
+successful conversion**, so the inbox empties as work completes (now-empty source
+subfolders are pruned). By default the raw file lands in the **same folder as its
+Markdown**. Set **`LM_ARCHIVE_DIR=/path`** to instead collect originals in a
+separate archive that mirrors the **source** tree (no `" md"` suffix), keeping the
+Markdown output and the raw files cleanly apart. Originals are moved, never deleted;
+on a conversion error the original is left in the inbox for retry; name clashes get
+an 8-char hash.
+
+With `LM_CONSUME_INBOX=1` and `LM_ARCHIVE_DIR=/DocConvert/processed`, dropping
+`Smith/contract.pdf` gives `output/Smith md/contract.pdf.md` **and**
+`processed/Smith/contract.pdf` (source mirror), and the inbox clears.
+
+With `LM_OUTPUT_LAYOUT=mirror` **and** `LM_CONSUME_INBOX=1`:
+
+| You drop into the inbox | Markdown written to | Raw original moved to |
+|-------------------------|---------------------|-----------------------|
+| `memo.pdf`              | `output/memo.pdf.md` | `output/memo.pdf` |
+| `Smith/contract.pdf`    | `output/Smith md/contract.pdf.md` | `output/Smith md/contract.pdf` |
+| `Smith/case.eml`        | `output/Smith md/case.eml md/case.eml.md` (+ one `.md` per attachment) | `output/Smith md/case.eml md/case.eml` |
+| `archive.pst`           | `output/archive.pst md/<mailbox folders>/<message> md/…` | `output/archive.pst md/archive.pst` |
+
+The raw files relocated into the output dir are **not** re-ingested — the watcher
+ignores the entire output directory.
 
 ### 2.1 Image descriptions
 

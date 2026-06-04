@@ -115,6 +115,12 @@ class Config:
     # When true, move each original out of the watch dir into its output folder
     # after a successful conversion, so the inbox empties as work completes.
     consume_source: bool = _env("LM_CONSUME_INBOX", "0").lower() in ("1", "true", "yes", "on")
+    # Optional separate archive for consumed originals. If set, moved files mirror
+    # the *source* tree here (no " md" suffix) instead of sitting next to the .md.
+    archive_dir: Optional[Path] = field(default_factory=lambda: (
+        Path(_env("LM_ARCHIVE_DIR", "")).expanduser().resolve()
+        if _env("LM_ARCHIVE_DIR", "") else None
+    ))
 
     @classmethod
     def from_args(cls, watch: Optional[str], output: Optional[str]) -> "Config":
@@ -996,11 +1002,20 @@ class Pipeline:
                 break
             d = d.parent
 
-    def _consume_source(self, src: Path, dest_dir: Path) -> None:
-        """Move a successfully-converted original into its output folder (clears the inbox)."""
+    def _consume_source(self, src: Path, md_dir: Path) -> None:
+        """Move a successfully-converted original out of the inbox (clears it).
+
+        Destination is LM_ARCHIVE_DIR (mirroring the source tree) when set, otherwise
+        ``md_dir`` (the folder holding the generated Markdown).
+        """
         if not self.cfg.consume_source:
             return
         import shutil
+        if self.cfg.archive_dir:
+            rel = _source_rel(src, self.cfg)
+            dest_dir = self.cfg.archive_dir.joinpath(*rel.parts[:-1])
+        else:
+            dest_dir = md_dir
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / src.name
@@ -1310,8 +1325,10 @@ class Pipeline:
             for child in sorted(path.rglob("*")):
                 if not child.is_file():
                     continue
-                # Avoid re-ingesting our own output directory.
+                # Avoid re-ingesting our own output / archive directories.
                 if self.cfg.output_dir in child.parents:
+                    continue
+                if self.cfg.archive_dir and self.cfg.archive_dir in child.parents:
                     continue
                 if child.suffix.lower() in ALL_SUPPORTED:
                     self.process_file(child, force=force)
@@ -1342,7 +1359,10 @@ def start_watcher(pipeline: Pipeline) -> "Observer":  # type: ignore[name-define
     class Handler(FileSystemEventHandler):
         def _handle(self, path_str: str) -> None:
             path = Path(path_str)
-            if cfg.output_dir in path.resolve().parents or path.resolve() == cfg.output_dir:
+            resolved = path.resolve()
+            if cfg.output_dir in resolved.parents or resolved == cfg.output_dir:
+                return
+            if cfg.archive_dir and (cfg.archive_dir in resolved.parents or resolved == cfg.archive_dir):
                 return
             if path.is_dir():
                 pipeline.process_path(path)
@@ -1465,7 +1485,8 @@ def run_mcp_server(pipeline: Pipeline, with_watcher: bool = True) -> None:
         return (
             f"Watch dir   : {cfg.watch_dir}\n"
             f"Output dir  : {cfg.output_dir}\n"
-            f"Layout      : {cfg.output_layout} (consume_source={cfg.consume_source})\n"
+            f"Layout      : {cfg.output_layout} (consume_source={cfg.consume_source}"
+            f"{', archive=' + str(cfg.archive_dir) if cfg.archive_dir else ''})\n"
             f"Docs engine : Docling (PDF/Word/Excel/PPTX/HTML/image OCR)\n"
             f"Transcriber : faster-whisper '{cfg.whisper_model}'\n"
             f"OCR langs   : {', '.join(cfg.ocr_langs)}\n"
