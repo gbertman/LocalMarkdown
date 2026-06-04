@@ -85,7 +85,7 @@ CLI flags override environment variables:
 | `LM_OUTPUT_LAYOUT`  | —           | `flat`               | `flat` = all `.md` in one folder; `mirror` = recreate the source tree, each folder suffixed (see `LM_DIR_SUFFIX`), files written as `<name>.md` |
 | `LM_DIR_SUFFIX`     | —           | ` md`                | In `mirror` layout, appended to every recreated folder name (e.g. `Smith` → `Smith md`) |
 | `LM_CONSUME_INBOX`  | —           | `0`                  | `1` = **move** each original out of the inbox after a successful convert, so the inbox empties (empty source dirs are pruned) |
-| `LM_ARCHIVE_DIR`    | —           | (unset)              | With `LM_CONSUME_INBOX=1`: move consumed originals here, mirroring the **source** tree (no suffix). Unset = keep them next to their `.md` |
+| `LM_ARCHIVE_DIR`    | —           | `<output>/../processed` | With `LM_CONSUME_INBOX=1`: where consumed originals go, mirroring the **source** tree (no suffix). Defaults to a `processed/` folder beside the output dir so raw files stay out of the Markdown output |
 | `LM_WHISPER_MODEL`  | —           | `base`               | faster-whisper size: `tiny`/`base`/`small`/`medium`/`large-v3` |
 | `LM_OCR_LANGS`      | —           | `en`                 | Docling OCR languages, e.g. `en,fr` |
 | `LM_IMAGE_DESCRIBE` | —           | `auto`               | `auto`/`ollama`/`openai`/`anthropic`/`blip`/`none` (see §2.1) |
@@ -119,17 +119,18 @@ Example: with `LM_CONSUME_INBOX=1`, output `/DocConvert/output`, dropping
 `/DocConvert/processed/Smith/contract.pdf` (source mirror), and the inbox clears —
 no extra configuration needed.
 
-With `LM_OUTPUT_LAYOUT=mirror` **and** `LM_CONSUME_INBOX=1`:
+With `LM_OUTPUT_LAYOUT=mirror` **and** `LM_CONSUME_INBOX=1` (raw originals default
+to the `processed/` archive, mirroring the source tree):
 
 | You drop into the inbox | Markdown written to | Raw original moved to |
 |-------------------------|---------------------|-----------------------|
-| `memo.pdf`              | `output/memo.pdf.md` | `output/memo.pdf` |
-| `Smith/contract.pdf`    | `output/Smith md/contract.pdf.md` | `output/Smith md/contract.pdf` |
-| `Smith/case.eml`        | `output/Smith md/case.eml md/case.eml.md` (+ one `.md` per attachment) | `output/Smith md/case.eml md/case.eml` |
-| `archive.pst`           | `output/archive.pst md/<mailbox folders>/<message> md/…` | `output/archive.pst md/archive.pst` |
+| `memo.pdf`              | `output/memo.pdf.md` | `processed/memo.pdf` |
+| `Smith/contract.pdf`    | `output/Smith md/contract.pdf.md` | `processed/Smith/contract.pdf` |
+| `Smith/case.eml`        | `output/Smith md/case.eml md/case.eml.md` (+ one `.md` per attachment) | `processed/Smith/case.eml` |
+| `archive.pst`           | `output/archive.pst md/<mailbox folders>/<message> md/…` | `processed/archive.pst` |
 
-The raw files relocated into the output dir are **not** re-ingested — the watcher
-ignores the entire output directory.
+Neither the **output** dir nor the **processed** archive is re-ingested — the
+watcher ignores both directories.
 
 ### 2.1 Image descriptions
 
