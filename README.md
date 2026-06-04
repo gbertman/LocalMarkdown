@@ -82,6 +82,9 @@ CLI flags override environment variables:
 |---------------------|-------------|----------------------|---------------------------------|
 | `LM_WATCH_DIR`      | `--watch`   | `./inbox`            | Folder to monitor               |
 | `LM_OUTPUT_DIR`     | `--output`  | `./markdown_output`  | Where `.md` files are written   |
+| `LM_OUTPUT_LAYOUT`  | —           | `flat`               | `flat` = all `.md` in one folder; `mirror` = recreate the source tree, each folder suffixed (see `LM_DIR_SUFFIX`), files written as `<name>.md` |
+| `LM_DIR_SUFFIX`     | —           | ` md`                | In `mirror` layout, appended to every recreated folder name (e.g. `Smith` → `Smith md`) |
+| `LM_CONSUME_INBOX`  | —           | `0`                  | `1` = **move** each original into its output folder after a successful convert, so the inbox empties (empty source dirs are pruned) |
 | `LM_WHISPER_MODEL`  | —           | `base`               | faster-whisper size: `tiny`/`base`/`small`/`medium`/`large-v3` |
 | `LM_OCR_LANGS`      | —           | `en`                 | Docling OCR languages, e.g. `en,fr` |
 | `LM_IMAGE_DESCRIBE` | —           | `auto`               | `auto`/`ollama`/`openai`/`anthropic`/`blip`/`none` (see §2.1) |
@@ -482,8 +485,11 @@ LocalMarkdown/
 
 ## 9. Security notes
 
-- The watcher only **reads** source files and **writes** Markdown to the output
-  directory — it never modifies or deletes your originals.
+- By default the watcher only **reads** source files and **writes** Markdown to
+  the output directory — it never modifies or deletes your originals. The one
+  exception is opt-in `LM_CONSUME_INBOX=1`, which **moves** each original into its
+  output folder after a successful conversion (to keep the inbox clear); it still
+  never deletes data — the file is relocated, not removed.
 - OCR/transcription run fully **locally**; no file content leaves the machine
   except when your MCP client requests it.
 - Run the Linux service as an unprivileged user (section 6) and keep the inbox

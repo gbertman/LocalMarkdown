@@ -107,6 +107,14 @@ class Config:
     openai_api_key: str = _env("LM_OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
     # Timeout (seconds) for a single local/remote VLM request.
     vlm_timeout: int = int(_env("LM_VLM_TIMEOUT", "120"))
+    # Output layout: "flat" = all .md in the output dir with mangled names;
+    # "mirror" = recreate the source folder tree, each folder suffixed with
+    # dir_suffix and each file written as <name>.md inside it.
+    output_layout: str = _env("LM_OUTPUT_LAYOUT", "flat").lower()
+    dir_suffix: str = _env("LM_DIR_SUFFIX", " md")
+    # When true, move each original out of the watch dir into its output folder
+    # after a successful conversion, so the inbox empties as work completes.
+    consume_source: bool = _env("LM_CONSUME_INBOX", "0").lower() in ("1", "true", "yes", "on")
 
     @classmethod
     def from_args(cls, watch: Optional[str], output: Optional[str]) -> "Config":
@@ -903,6 +911,36 @@ def safe_md_name(src: Path, cfg: Config) -> str:
     return f"{slug}.{digest}.md"
 
 
+def _source_rel(src: Path, cfg: Config) -> Path:
+    """Path of a source file relative to the watch dir (or just its name if outside)."""
+    try:
+        return src.relative_to(cfg.watch_dir)
+    except ValueError:
+        return Path(src.name)
+
+
+def output_md_path(src: Path, cfg: Config) -> Path:
+    """Output .md path for a source file, honoring LM_OUTPUT_LAYOUT (flat|mirror).
+
+    flat   -> <output>/<slug>.<hash>.md   (legacy; everything in one folder)
+    mirror -> <output>/<dir> md/<dir> md/<name>.md   (source tree recreated)
+    """
+    rel = _source_rel(src, cfg)
+    if cfg.output_layout == "mirror":
+        dirs = [f"{p}{cfg.dir_suffix}" for p in rel.parts[:-1]]
+        return cfg.output_dir.joinpath(*dirs, f"{rel.parts[-1]}.md")
+    slug = "_".join(rel.parts).replace(" ", "_")
+    digest = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:8]
+    return cfg.output_dir / f"{slug}.{digest}.md"
+
+
+def mirror_container_dir(rel: Path, cfg: Config) -> Path:
+    """Folder that holds an email/PST's outputs (every rel part becomes a ' md' dir)."""
+    if cfg.output_layout == "mirror":
+        return cfg.output_dir.joinpath(*[f"{p}{cfg.dir_suffix}" for p in rel.parts])
+    return cfg.output_dir
+
+
 class Pipeline:
     def __init__(self, cfg: Config, catalog: Catalog) -> None:
         self.cfg = cfg
@@ -944,6 +982,38 @@ class Pipeline:
         with self._skip_lock:
             return list(self._skipped.values())
 
+    def _prune_empty_dirs(self, start: Path) -> None:
+        """Remove now-empty source folders up to (but not including) the watch dir."""
+        try:
+            d = start.resolve()
+        except OSError:
+            return
+        watch = self.cfg.watch_dir
+        while d != watch and watch in d.parents:
+            try:
+                d.rmdir()  # only succeeds when empty
+            except OSError:
+                break
+            d = d.parent
+
+    def _consume_source(self, src: Path, dest_dir: Path) -> None:
+        """Move a successfully-converted original into its output folder (clears the inbox)."""
+        if not self.cfg.consume_source:
+            return
+        import shutil
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / src.name
+            if dest.resolve() == src.resolve():
+                return
+            if dest.exists():
+                dest = dest_dir / f"{src.stem}.{file_hash(src)[:8]}{src.suffix}"
+            shutil.move(str(src), str(dest))
+            log.info("COMPLETED: moved original -> %s (inbox cleared)", dest)
+            self._prune_empty_dirs(src.parent)
+        except OSError as exc:
+            log.warning("Could not move original %s: %s", src, exc)
+
     def process_file(self, src: Path, force: bool = False) -> Optional[Path]:
         src = src.resolve()
         if not src.is_file():
@@ -982,8 +1052,8 @@ class Pipeline:
             log.warning("Skipping %s: exceeds LM_MAX_BYTES guard.", src.name)
             return None
 
-        md_name = safe_md_name(src, self.cfg)
-        out_path = self.cfg.output_dir / md_name
+        out_path = output_md_path(src, self.cfg)
+        md_name = out_path.relative_to(self.cfg.output_dir).as_posix()
         log.info("Processing [%s] %s", kind, src)
         try:
             body = convert(src, self.cfg)
@@ -1010,14 +1080,15 @@ class Pipeline:
         self.catalog.record(src, md_name, digest, kind, status)
         if status == "ok":
             self.stats["processed"] += 1
+            self._consume_source(src, out_path.parent)
         return out_path
 
     # -- Email / PST helpers ------------------------------------------------ #
 
     def _write_status_md(self, src: Path, digest: str, kind: str, status: str, body: str) -> Path:
         """Write a small placeholder Markdown so failures/notices are visible in the catalog."""
-        md_name = safe_md_name(src, self.cfg)
-        out_path = self.cfg.output_dir / md_name
+        out_path = output_md_path(src, self.cfg)
+        md_name = out_path.relative_to(self.cfg.output_dir).as_posix()
         frontmatter = build_frontmatter({
             "source": str(src),
             "filename": src.name,
@@ -1033,25 +1104,49 @@ class Pipeline:
         return out_path
 
     def _emit_email_files(
-        self, parsed: ParsedEmail, base_slug: str, source_id: str, container: Optional[str]
-    ) -> tuple[str, int]:
+        self, parsed: ParsedEmail, rel: Path, source_id: str, container: Optional[str]
+    ) -> tuple[str, int, Path]:
         """Write the email body Markdown plus one provenance-tagged file per attachment.
 
-        Returns (email_markdown_name, attachment_count). Attachment files are named
-        ``<base_slug>__attNN__<filename>.<hash>.md`` and carry frontmatter linking
-        them back to the parent email; the email file links forward to each of them.
+        Returns (email_markdown_relpath, attachment_count, email_output_dir).
+        In mirror layout the email gets its own ``<name> md`` folder holding the body
+        (``<name>.md``) and each attachment as ``<filename>.md``; in flat layout
+        everything lands in the output dir with a ``<slug>__attNN__`` naming scheme.
+        Either way each attachment's frontmatter links back to the parent email.
         """
         out_dir = self.cfg.output_dir
-        out_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         subject = parsed.headers.get("Subject", "")
+        mirror = self.cfg.output_layout == "mirror"
+        email_name = rel.parts[-1]
 
-        att_links: list[tuple[str, str, str, int]] = []  # (filename, md_name, kind, size)
+        if mirror:
+            email_dir = mirror_container_dir(rel, self.cfg)
+            email_md_path = email_dir / f"{email_name}.md"
+        else:
+            email_dir = out_dir
+            base_slug = "_".join(rel.parts).replace(" ", "_")
+            short_email = hashlib.sha1(source_id.encode("utf-8")).hexdigest()[:8]
+            email_md_path = out_dir / f"{base_slug}.{short_email}.md"
+        email_dir.mkdir(parents=True, exist_ok=True)
+
+        used: set = set()
+        att_links: list[tuple[str, str, str, int]] = []  # (filename, link_target, kind, size)
         for i, (filename, data) in enumerate(parsed.attachments, start=1):
             kind, body = convert_attachment_bytes(filename, data, self.cfg)
-            att_slug = f"{base_slug}__att{i:02d}__{filename}".replace(" ", "_")
-            short = hashlib.sha1(f"{source_id}::{i}::{filename}".encode("utf-8")).hexdigest()[:8]
-            att_md_name = f"{att_slug}.{short}.md"
+            if mirror:
+                link_target = f"{filename}.md"
+                n = 1
+                while link_target in used:
+                    link_target = f"{Path(filename).stem}_{n}{Path(filename).suffix}.md"
+                    n += 1
+                used.add(link_target)
+                att_path = email_dir / link_target
+            else:
+                att_slug = f"{base_slug}__att{i:02d}__{filename}".replace(" ", "_")
+                short = hashlib.sha1(f"{source_id}::{i}::{filename}".encode("utf-8")).hexdigest()[:8]
+                link_target = f"{att_slug}.{short}.md"
+                att_path = out_dir / link_target
             att_fm = build_frontmatter({
                 "source": f"{source_id}#attachment:{filename}",
                 "filename": filename,
@@ -1066,29 +1161,30 @@ class Pipeline:
                 "processed": now,
                 "status": "ok",
             })
-            (out_dir / att_md_name).write_text(
+            att_path.parent.mkdir(parents=True, exist_ok=True)
+            att_path.write_text(
                 f"{att_fm}\n\n# Attachment: {filename}\n\n"
                 f"_From email: {subject or '(no subject)'}_\n\n{body}\n",
                 encoding="utf-8",
             )
             self.catalog.record(
-                Path(f"{source_id}#attachment:{filename}"), att_md_name, short, kind, "ok"
+                Path(f"{source_id}#attachment:{filename}"),
+                att_path.relative_to(out_dir).as_posix(), "", kind, "ok",
             )
-            att_links.append((filename, att_md_name, kind, len(data)))
+            att_links.append((filename, link_target, kind, len(data)))
 
         parts = ["## Headers", _fmt_headers(parsed.headers),
                  "\n## Body", parsed.body or "_(no body text)_"]
         if att_links:
             parts.append("\n## Attachments")
-            for filename, md_name, kind, size in att_links:
-                parts.append(f"- [{filename}]({md_name}) — {kind}, {size:,} bytes")
+            for filename, target, kind, size in att_links:
+                parts.append(f"- [{filename}](<{target}>) — {kind}, {size:,} bytes")
         elif parsed.attachments:
             parts.append("\n## Attachments\n_(present but none could be converted)_")
 
-        email_md_name = f"{base_slug}.{hashlib.sha1(source_id.encode('utf-8')).hexdigest()[:8]}.md"
         email_fm = build_frontmatter({
             "source": source_id,
-            "filename": base_slug,
+            "filename": email_name,
             "type": "email",
             "origin": "email",
             "subject": subject,
@@ -1100,11 +1196,11 @@ class Pipeline:
             "processed": now,
             "status": "ok",
         })
-        (out_dir / email_md_name).write_text(
-            f"{email_fm}\n\n# {subject or base_slug}\n\n" + "\n".join(parts) + "\n",
+        email_md_path.write_text(
+            f"{email_fm}\n\n# {subject or email_name}\n\n" + "\n".join(parts) + "\n",
             encoding="utf-8",
         )
-        return email_md_name, len(att_links)
+        return email_md_path.relative_to(out_dir).as_posix(), len(att_links), email_dir
 
     def _process_email(self, src: Path, force: bool = False) -> Optional[Path]:
         """Convert a single .eml/.msg: email body + a separate file per attachment."""
@@ -1121,11 +1217,7 @@ class Pipeline:
             md_name = self.catalog._data.get(str(src), {}).get("markdown")
             return self.cfg.output_dir / md_name if md_name else None
 
-        try:
-            rel = src.relative_to(self.cfg.watch_dir)
-        except ValueError:
-            rel = Path(src.name)
-        base_slug = "_".join(rel.parts).replace(" ", "_")
+        rel = _source_rel(src, self.cfg)
 
         try:
             parsed = _parse_email(src)
@@ -1135,10 +1227,11 @@ class Pipeline:
             return self._write_status_md(src, digest, "email", "error",
                                          f"> **Email parse failed:** `{exc}`")
 
-        email_md_name, n_att = self._emit_email_files(parsed, base_slug, str(src), container=None)
+        email_md_name, n_att, email_dir = self._emit_email_files(parsed, rel, str(src), container=None)
         self.catalog.record(src, email_md_name, digest, "email", "ok")
         self.stats["processed"] += 1
         log.info("Email %s -> %s (+%d attachment file(s))", src.name, email_md_name, n_att)
+        self._consume_source(src, email_dir)
         return self.cfg.output_dir / email_md_name
 
     def _process_pst(self, src: Path, force: bool = False) -> Optional[Path]:
@@ -1168,6 +1261,7 @@ class Pipeline:
             self.stats["errors"] += 1
             return self._write_status_md(src, digest, "pst", "error", f"> **{note}**")
 
+        pst_rel = _source_rel(src, self.cfg)  # e.g. archive.pst (or sub/archive.pst)
         tmp = Path(tempfile.mkdtemp(prefix="lm_pst_"))
         messages = attachments = 0
         try:
@@ -1177,18 +1271,17 @@ class Pipeline:
                 check=True, capture_output=True,
             )
             for eml in sorted(tmp.rglob("*.eml")):
-                rel = eml.relative_to(tmp)
-                source_id = f"{src}!{rel.as_posix()}"
-                base_slug = f"{src.stem}_" + "_".join(rel.parts)
-                base_slug = base_slug[:-4] if base_slug.lower().endswith(".eml") else base_slug
-                base_slug = base_slug.replace(" ", "_")
+                msg_rel = eml.relative_to(tmp)
+                source_id = f"{src}!{msg_rel.as_posix()}"
+                # Logical output path: <pst path>/<mailbox folders>/<message>
+                rel = Path(*pst_rel.parts, *msg_rel.parts)
                 try:
                     parsed = _parse_eml(eml)
-                    _, n_att = self._emit_email_files(parsed, base_slug, source_id, container=str(src))
+                    _, n_att, _ = self._emit_email_files(parsed, rel, source_id, container=str(src))
                     messages += 1
                     attachments += n_att
                 except Exception as exc:  # noqa: BLE001 - skip a bad message, keep going
-                    log.exception("Failed to convert message %s from %s", rel, src.name)
+                    log.exception("Failed to convert message %s from %s", msg_rel, src.name)
         except subprocess.CalledProcessError as exc:
             err = (exc.stderr or b"").decode("utf-8", "replace")[:500]
             log.error("readpst failed on %s: %s", src.name, err)
@@ -1203,6 +1296,7 @@ class Pipeline:
         )
         self.stats["processed"] += 1
         log.info("PST %s -> %d message(s), %d attachment(s).", src.name, messages, attachments)
+        self._consume_source(src, mirror_container_dir(pst_rel, self.cfg))
         return None
 
     def process_path(self, path: Path, force: bool = False) -> int:
@@ -1314,7 +1408,7 @@ def run_mcp_server(pipeline: Pipeline, with_watcher: bool = True) -> None:
             return "Please provide a non-empty query."
         needle = query.lower()
         hits: list[str] = []
-        for md in sorted(cfg.output_dir.glob("*.md")):
+        for md in sorted(cfg.output_dir.rglob("*.md")):
             try:
                 text = md.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -1371,6 +1465,7 @@ def run_mcp_server(pipeline: Pipeline, with_watcher: bool = True) -> None:
         return (
             f"Watch dir   : {cfg.watch_dir}\n"
             f"Output dir  : {cfg.output_dir}\n"
+            f"Layout      : {cfg.output_layout} (consume_source={cfg.consume_source})\n"
             f"Docs engine : Docling (PDF/Word/Excel/PPTX/HTML/image OCR)\n"
             f"Transcriber : faster-whisper '{cfg.whisper_model}'\n"
             f"OCR langs   : {', '.join(cfg.ocr_langs)}\n"
