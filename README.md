@@ -12,7 +12,7 @@ documents, media and images.
 | Video      | **faster-whisper**                 | `.mp4 .mkv .mov .avi .webm .m4v .wmv .flv`  |
 | Images     | Pillow + Docling OCR + VLM caption  | `.png .jpg .jpeg .bmp .tiff .gif .webp`     |
 | Plain/data | built-in                           | `.txt .md .log .json .yaml`, `.csv .tsv`    |
-| Email      | stdlib / extract-msg / readpst     | `.eml .msg .pst` (attachments converted to their own files) |
+| Email      | stdlib / extract-msg / readpst     | `.eml .msg`; mailboxes `.pst` & `.mbox` burst into one file per message (attachments converted to their own files) |
 
 Image files get three layers: technical **properties** (Pillow), a natural-language
 **description** from a vision model (Claude vision, or a local BLIP caption when
@@ -128,6 +128,7 @@ to the `processed/` archive, mirroring the source tree):
 | `Smith/contract.pdf`    | `output/Smith md/contract.pdf.md` | `processed/Smith/contract.pdf` |
 | `Smith/case.eml`        | `output/Smith md/case.eml md/case.eml.md` (+ one `.md` per attachment) | `processed/Smith/case.eml` |
 | `archive.pst`           | `output/archive.pst md/<mailbox folders>/<message> md/…` | `processed/archive.pst` |
+| `All mail.mbox`         | `output/All mail.mbox md/<NNNNN-subject> md/…` (one folder per message) | `processed/All mail.mbox` |
 
 Neither the **output** dir nor the **processed** archive is re-ingested — the
 watcher ignores both directories.
@@ -524,6 +525,7 @@ journalctl -u localmarkdown.service -f      # confirm a clean start
 | Re-process an unchanged file | `process <path> --force`, or the `process_path(..., force=true)` tool. |
 | `.msg` files skipped / `extract-msg is not installed` | `pip install extract-msg` (already in requirements.txt). |
 | `.pst` shows `readpst not found` | `sudo apt install pst-utils`. The `.pst` is exploded into one Markdown per message. |
+| `.mbox` (Unix / Google Takeout) | Handled by the Python stdlib `mailbox` module — **no install needed**. Burst into one Markdown per message; messages named `<NNNNN>-<subject>`. |
 | Which email did an attachment come from? | Open the attachment `.md`: its frontmatter has `attachment_of`, `email_subject`, and `container`. Files also share the email's name prefix and carry an `__attNN__` marker. |
 
 ---

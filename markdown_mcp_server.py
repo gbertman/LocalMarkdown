@@ -152,13 +152,16 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
 TEXT_EXTS = {".txt", ".md", ".markdown", ".log", ".json", ".yaml", ".yml"}
 CSV_EXTS = {".csv", ".tsv"}
 # Email: .eml/.msg convert to one Markdown file each (attachments inlined);
-# .pst is an Outlook *mailbox* and is burst into many messages (see _process_pst).
+# .pst (Outlook) and .mbox (Unix/Google Takeout) are *mailboxes* burst into many
+# messages (see _process_pst / _process_mbox).
 EMAIL_EXTS = {".eml", ".msg"}
 PST_EXTS = {".pst"}
+MBOX_EXTS = {".mbox"}
 
 ALL_SUPPORTED = (
     PDF_EXTS | EXCEL_EXTS | WORD_EXTS | PPTX_EXTS | HTML_EXTS | AUDIO_EXTS
     | VIDEO_EXTS | IMAGE_EXTS | TEXT_EXTS | CSV_EXTS | EMAIL_EXTS | PST_EXTS
+    | MBOX_EXTS
 )
 
 log = logging.getLogger("localmarkdown")
@@ -704,12 +707,12 @@ def _email_body_text(msg) -> str:
     return ""
 
 
-def _parse_eml(path: Path) -> ParsedEmail:
-    import email
-    from email import policy
+def _parse_message(msg) -> ParsedEmail:
+    """Build a ParsedEmail from a parsed email.message.EmailMessage (modern policy).
 
-    with path.open("rb") as fh:
-        msg = email.message_from_binary_file(fh, policy=policy.default)
+    Shared by the .eml, .pst (burst-to-eml) and .mbox paths so all email-like
+    sources produce identical Markdown.
+    """
     headers = {}
     for h in ("From", "To", "Cc", "Bcc", "Subject", "Date"):
         val = msg.get(h)
@@ -727,6 +730,47 @@ def _parse_eml(path: Path) -> ParsedEmail:
                 data = data.encode("utf-8", "replace")
             attachments.append((filename, bytes(data)))
     return ParsedEmail(headers=headers, body=_email_body_text(msg), attachments=attachments)
+
+
+def _parse_eml(path: Path) -> ParsedEmail:
+    import email
+    from email import policy
+
+    with path.open("rb") as fh:
+        msg = email.message_from_binary_file(fh, policy=policy.default)
+    return _parse_message(msg)
+
+
+def _safe_component(text: str, maxlen: int = 60) -> str:
+    """Turn an arbitrary string (e.g. a subject line) into a safe path component."""
+    import re
+
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().strip(".")
+    return cleaned[:maxlen].strip() or "message"
+
+
+def _iter_mbox(path: Path):
+    """Yield (1-based index, ParsedEmail) for each message in an mbox file.
+
+    Uses the stdlib `mailbox` module, which builds a lightweight table of contents
+    and reads one message at a time — so multi-GB mailboxes (e.g. Google Takeout)
+    don't have to be loaded into memory at once.
+    """
+    import mailbox
+    from email import message_from_bytes, policy
+
+    box = mailbox.mbox(str(path))
+    try:
+        for i, key in enumerate(box.keys(), start=1):
+            try:
+                raw = box.get_bytes(key)
+                msg = message_from_bytes(raw, policy=policy.default)
+                yield i, _parse_message(msg)
+            except Exception:  # noqa: BLE001 - skip one bad message, keep going
+                log.exception("Failed to parse message %d in %s", i, path.name)
+    finally:
+        box.close()
 
 
 def _parse_msg(path: Path) -> ParsedEmail:
@@ -1072,6 +1116,8 @@ class Pipeline:
         suffix = src.suffix.lower()
         if suffix in PST_EXTS:
             return self._process_pst(src, force=force)
+        if suffix in MBOX_EXTS:
+            return self._process_mbox(src, force=force)
         if suffix in EMAIL_EXTS:
             return self._process_email(src, force=force)
         mapping = converter_for(src.suffix)
@@ -1345,6 +1391,51 @@ class Pipeline:
         self.stats["processed"] += 1
         log.info("PST %s -> %d message(s), %d attachment(s).", src.name, messages, attachments)
         self._consume_source(src, mirror_container_dir(pst_rel, self.cfg))
+        return None
+
+    def _process_mbox(self, src: Path, force: bool = False) -> Optional[Path]:
+        """Burst a Unix/Google-Takeout mbox mailbox into messages (stdlib `mailbox`)."""
+        if not wait_until_stable(src):
+            log.warning("File vanished before processing: %s", src)
+            return None
+        try:
+            digest = file_hash(src)
+        except OSError as exc:
+            log.warning("Cannot read %s: %s", src, exc)
+            return None
+        if not force and not self.catalog.needs_processing(src, digest):
+            self.stats["skipped"] += 1
+            log.debug("Unchanged, skipping: %s", src.name)
+            return None
+
+        mbox_rel = _source_rel(src, self.cfg)  # e.g. archive.mbox (or sub/archive.mbox)
+        messages = attachments = 0
+        try:
+            for i, parsed in _iter_mbox(src):
+                subject = parsed.headers.get("Subject", "")
+                # Each message gets a stable, sortable name under the mbox container:
+                # <NNNNN>-<sanitized subject>.eml -> .../<message> md/<message>.eml.md
+                msg_name = f"{i:05d}-{_safe_component(subject)}.eml"
+                rel = Path(*mbox_rel.parts, msg_name)
+                source_id = f"{src}!{i:05d}"
+                try:
+                    _, n_att, _ = self._emit_email_files(parsed, rel, source_id, container=str(src))
+                    messages += 1
+                    attachments += n_att
+                except Exception:  # noqa: BLE001 - skip a bad message, keep going
+                    log.exception("Failed to convert message %d from %s", i, src.name)
+        except Exception as exc:  # noqa: BLE001 - a corrupt/locked mbox shouldn't crash the watcher
+            self.stats["errors"] += 1
+            log.exception("Failed to read mbox %s", src.name)
+            return self._write_status_md(src, digest, "mbox", "error",
+                                         f"> **mbox read failed:** `{exc}`")
+
+        self.catalog.record(
+            src, f"{messages} message(s), {attachments} attachment(s)", digest, "mbox", "ok"
+        )
+        self.stats["processed"] += 1
+        log.info("Mbox %s -> %d message(s), %d attachment(s).", src.name, messages, attachments)
+        self._consume_source(src, mirror_container_dir(mbox_rel, self.cfg))
         return None
 
     def process_path(self, path: Path, force: bool = False) -> int:

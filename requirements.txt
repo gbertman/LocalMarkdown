@@ -52,7 +52,9 @@ Pillow>=10.0.0          # technical image metadata (size/mode/format)
 # ANTHROPIC_API_KEY is set, else local BLIP, else skips descriptions.
 
 # --- Email parsing ----------------------------------------------------------
-# .eml is handled entirely by the Python standard library (no dependency).
+# .eml and .mbox are handled entirely by the Python standard library (no
+# dependency). .mbox mailboxes (Unix / Google Takeout) are burst into one
+# Markdown per message via the stdlib `mailbox` module.
 # .msg (Outlook single message) needs extract-msg:
 extract-msg>=0.45.0
 # .pst (Outlook mailbox) is exploded into messages by the `readpst` binary from
