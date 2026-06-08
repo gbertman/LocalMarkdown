@@ -950,7 +950,11 @@ class Catalog:
     def needs_processing(self, src: Path, digest: str) -> bool:
         with self._lock:
             entry = self._data.get(str(src))
-            return not entry or entry.get("hash") != digest
+            if not entry or entry.get("hash") != digest:
+                return True
+            # A prior *failed* conversion is recorded with status="error"; retry
+            # it on the next scan instead of skipping it forever.
+            return entry.get("status") != "ok"
 
     def record(self, src: Path, md_name: str, digest: str, kind: str, status: str) -> None:
         with self._lock:
