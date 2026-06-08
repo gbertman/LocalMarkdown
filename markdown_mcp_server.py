@@ -146,8 +146,10 @@ EXCEL_EXTS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 WORD_EXTS = {".docx"}
 PPTX_EXTS = {".pptx"}
 HTML_EXTS = {".html", ".htm"}
-AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"}
-VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma",
+              ".amr", ".opus", ".aiff", ".aif", ".m4b", ".caf"}
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv",
+              ".3gp", ".3gpp", ".3g2", ".mpg", ".mpeg", ".mts", ".m2ts"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
 TEXT_EXTS = {".txt", ".md", ".markdown", ".log", ".json", ".yaml", ".yml"}
 CSV_EXTS = {".csv", ".tsv"}
