@@ -87,6 +87,9 @@ class Config:
     watch_dir: Path
     output_dir: Path
     whisper_model: str = _env("LM_WHISPER_MODEL", "base")
+    # Transcription device: auto (GPU if free, else CPU) | cpu | cuda.
+    # Use "cpu" to keep Whisper off a GPU that docling already fills.
+    whisper_device: str = _env("LM_WHISPER_DEVICE", "auto")
     ocr_langs: tuple[str, ...] = field(
         default_factory=lambda: tuple(
             s.strip() for s in _env("LM_OCR_LANGS", "en").split(",") if s.strip()
@@ -223,8 +226,14 @@ class _Lazy:
                 self._docling_langs = ocr_langs
             return self._docling
 
-    def faster_whisper(self, model_name: str):
-        """Return a cached faster-whisper model (CTranslate2 backend, no torch needed)."""
+    def faster_whisper(self, model_name: str, device_pref: str = "auto"):
+        """Return a cached faster-whisper model (CTranslate2 backend).
+
+        device_pref: "auto" (GPU if available else CPU), "cuda", or "cpu".
+        On a GPU load failure (e.g. CUDA out of memory when docling already
+        fills the card) it automatically falls back to CPU, so a full GPU never
+        kills the whole media batch.
+        """
         with self._lock:
             if self._fw_model is None or self._fw_name != model_name:
                 try:
@@ -234,14 +243,25 @@ class _Lazy:
                         "faster-whisper is not installed. Install it with "
                         "`pip install faster-whisper` to transcribe audio/video."
                     ) from exc
-                device = "cuda" if _cuda_available() else "cpu"
-                compute_type = "float16" if device == "cuda" else "int8"
-                log.info(
-                    "Loading faster-whisper '%s' on %s (%s); first use downloads weights...",
-                    model_name, device, compute_type,
-                )
-                self._fw_model = WhisperModel(model_name, device=device, compute_type=compute_type)
-                self._fw_name = model_name
+                pref = (device_pref or "auto").lower()
+                if pref == "cpu":
+                    attempts = [("cpu", "int8")]
+                elif pref == "cuda":
+                    attempts = [("cuda", "float16"), ("cpu", "int8")]
+                else:  # auto
+                    attempts = ([("cuda", "float16")] if _cuda_available() else []) + [("cpu", "int8")]
+                last_exc = None
+                for device, compute_type in attempts:
+                    try:
+                        log.info("Loading faster-whisper '%s' on %s (%s)...", model_name, device, compute_type)
+                        self._fw_model = WhisperModel(model_name, device=device, compute_type=compute_type)
+                        self._fw_name = model_name
+                        return self._fw_model
+                    except Exception as exc:  # noqa: BLE001 - try the next device
+                        last_exc = exc
+                        log.warning("faster-whisper failed to load on %s (%s); trying next option.",
+                                    device, exc)
+                raise RuntimeError(f"Could not load faster-whisper on any device: {last_exc}")
             return self._fw_model
 
     def blip(self):
@@ -374,7 +394,7 @@ def convert_with_docling(path: Path, cfg: Config) -> str:
 
 def convert_media(path: Path, cfg: Config) -> str:
     """Transcribe audio/video with faster-whisper (CTranslate2 backend)."""
-    model = LAZY.faster_whisper(cfg.whisper_model)
+    model = LAZY.faster_whisper(cfg.whisper_model, cfg.whisper_device)
     log.info("Transcribing %s ...", path.name)
     # vad_filter trims silence; iterating the generator is what runs the model.
     segments, info = model.transcribe(str(path), beam_size=5, vad_filter=True)
