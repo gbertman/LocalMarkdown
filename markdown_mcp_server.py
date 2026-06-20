@@ -392,13 +392,35 @@ def convert_with_docling(path: Path, cfg: Config) -> str:
     return md.strip() if md and md.strip() else "_(Docling produced no content)_"
 
 
+def _has_audio_stream(path: Path) -> bool:
+    """True if the media file contains a decodable audio stream.
+
+    Many videos (screen recordings, time-lapses, security/site walkthroughs) have
+    no audio track; faster-whisper's decoder raises IndexError on those, so we
+    check first and skip transcription cleanly instead of erroring.
+    """
+    try:
+        import av
+        with av.open(str(path)) as container:
+            return any(s.type == "audio" for s in container.streams)
+    except Exception:  # noqa: BLE001 - if we can't probe, let transcribe try
+        return True
+
+
 def convert_media(path: Path, cfg: Config) -> str:
     """Transcribe audio/video with faster-whisper (CTranslate2 backend)."""
+    if not _has_audio_stream(path):
+        log.info("No audio stream in %s; skipping transcription.", path.name)
+        return "_(no audio track in this file — nothing to transcribe)_"
     model = LAZY.faster_whisper(cfg.whisper_model, cfg.whisper_device)
     log.info("Transcribing %s ...", path.name)
     # vad_filter trims silence; iterating the generator is what runs the model.
-    segments, info = model.transcribe(str(path), beam_size=5, vad_filter=True)
-    lines = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
+    try:
+        segments, info = model.transcribe(str(path), beam_size=5, vad_filter=True)
+        lines = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
+    except IndexError:
+        # PyAV raises this when there is no usable audio stream after all.
+        return "_(no audio track in this file — nothing to transcribe)_"
     text = " ".join(lines).strip()
     prob = getattr(info, "language_probability", 0.0) or 0.0
     header = (
